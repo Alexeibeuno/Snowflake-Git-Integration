@@ -1,46 +1,74 @@
-name: Deploy Templatized Data Environment
+name: "Snowflake DevOps Workflow"
 
 on:
-  pull_request:
-    branches:
-      -DEV
   push:
     branches:
-      -DEV
+      - main
+      - DEV  # Ensure the DEV branch is included
+  pull_request:
+    branches:
+      - main
+      - DEV  # Ensure the DEV branch is included
 
 jobs:
-  deploy_data_environment:
-    # Only run when PR is merged or on direct push to environment branches
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+  snowflake-terraform-demo:
+    name: "Snowflake Terraform Demo Job"
     runs-on: ubuntu-latest
+    permissions:
+      issues: write  # Permission to write to issues (needed to comment)
+      pull-requests: write
 
     env:
       # Read connection secret
       SNOWFLAKE_CONNECTIONS_ADVANCED_DATA_ENGINEERING_SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
       SNOWFLAKE_CONNECTIONS_ADVANCED_DATA_ENGINEERING_SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
       SNOWFLAKE_CONNECTIONS_ADVANCED_DATA_ENGINEERING_SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
-
+      
     steps:
-      # Checkout step is necessary to access repository files
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v2
 
-      # Determine environment based on target branch
-      - name: Set environment
-        id: set_env
+      - name: Determine working directory
+        id: set-working-dir
         run: |
-          TARGET_BRANCH="${GITHUB_BASE_REF:-${GITHUB_REF#refs/heads/}}"
-          
-          if [[ $TARGET_BRANCH == "DEV" ]]; then
-            echo "DEPLOY_ENV=staging" >> $GITHUB_ENV
-            echo "Environment set to staging"
-          elif [[ $TARGET_BRANCH == "main" ]]; then
-            echo "DEPLOY_ENV=prod" >> $GITHUB_ENV
-            echo "Environment set to production"
+          if [ "${GITHUB_REF}" == "refs/heads/main" ]; then
+            echo "Working directory is root"
+            echo "::set-output name=dir::./"
           else
-            echo "Unexpected branch: $TARGET_BRANCH"
-            exit 1
+            echo "Working directory is dev-terraform"
+            echo "::set-output name=dir::./dev-terraform/"
           fi
+
+      
+
+      - uses: actions/github-script@0.9.0
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+            
+            <details><summary>Show Plan</summary>
+            
+            \`\`\`\n
+            ${process.env.PLAN}
+            \`\`\`
+            
+            </details>
+            
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ env.tf_actions_working_dir }}\`, Workflow: \`${{ github.workflow }}\`*`;
+            
+            github.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
 
       # Install Snowflake CLI GitHub Action and point to config file
       - name: Install SnowflakeCLI
@@ -51,14 +79,15 @@ jobs:
 
       # Fetch latest changes from the repository to Snowflake
       - name: Fetch latest changes to Snowflake
-        run: snow git fetch dev.public.SNOW_GIT_INTEGRATION
+        run: snow git fetch dev.public.Snow_Git_Integration
 
       # Deploy templates to the data environment -
       - name: Deploy templates to data environment
         run: |
           # Export TARGET_BRANCH for use in this step
-          echo "Using branch: ${GITHUB_REF_NAME}"
+          echo "Using branch: ${GITHUB_REF}"
           snow git execute @SNOW_GIT_INTEGRATION/branches/DEV/sql_files/.*sql \
           -D "env='${{  }}'" \
           --database=DEV \
           --schema=PUBLIC
+      
